@@ -1,0 +1,7 @@
+services:
+
+    shipping_providers:
+        namespace: App\Infrastructure\Domain\Model\Shipping\
+        resource: '%kernel.project_dir%/src/Infrastructure/Domain/Model/Shipping/*/*ShippingGateway.php'
+        arguments:
+            $request: '@=service("request_stack").getCurrentRequest()'

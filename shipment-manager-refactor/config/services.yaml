@@ -1,0 +1,466 @@
+# This file is the entry point to configure your own services.
+# Files in the packages/ subdirectory configure your dependencies.
+
+# Put parameters here that don't need to change on each machine where the app is deployed
+# https://symfony.com/doc/current/best_practices.html#use-parameters-for-application-configuration
+parameters:
+    container.dumper.inline_factories: '%env(bool:INLINE_FACTORIES)%'
+    app.supported_locales: 'en_US|bg_BG|ro_RO|el_GR|de_DE|fr_FR|hu_HU|pl_PL|id_ID|ur_PK|tl_PH'
+    app.supported_languages:
+        - en_US
+        - bg_BG
+        - ro_RO
+        - el_GR
+        - de_DE
+        - fr_FR
+        - hu_HU
+        - pl_PL
+        - id_ID
+        - ur_PK
+        - tl_PH
+    app.tenant_commands:
+        - doctrine:fixtures:load
+        - doctrine:migrations:diff
+        - doctrine:migrations:execute
+        - doctrine:migrations:generate
+        - doctrine:migrations:migrate
+        - doctrine:migrations:version
+        - doctrine:migrations:status
+        - doctrine:mapping:info
+        - doctrine:schema:validate
+        - doctrine:schema:update
+    # Most routes require x-tenant-id header
+    app.non_tenant_routes:
+        - docs
+        - admin_get_settings
+        - admin_update_settings
+        - admin_get_all_apps
+        - admin_install_app
+        - admin_get_single_app
+    app.wrap_in_transaction: false
+    app.redis_dsn: '%env(REDIS_DSN)%'
+    app.admin_routes_name_prefix: 'admin_'
+    app.shipment_db_encryption_key: '%env(DB_ENCRYPTION_KEY)%'
+    app.config_encryption_key: '%env(CONFIG_ENCRYPTION_KEY)%'
+    app.supported_shipment_providers: [ 'econt', 'inout', 'speedy', 'sky-net', 'kwik', 'dhl', 'own-delivery', 'delhivery', 'cvc', 'the-courier-guy', 'sonic', 'pargo', 'uparcel', 'ups', 'fedex', 'shipdeo', 'jnt', 'post-ex', 'leopards', 'bobgo']
+    app.sensitive_data:
+        - password
+        - token
+        - entityId
+        - entityPin
+        - accountNumber
+    env(FEATURE_FLAGS_FILE): '%kernel.project_dir%/feature_flags.json'
+    app.growthbook_client_key: '%env(GROWTHBOOK_CLIENT_KEY)%'
+    app.default_feature_flags: []
+    app.feature_flags: '%env(default:app.default_feature_flags:json:file:resolve:FEATURE_FLAGS_FILE)%'
+
+services:
+    # default configuration for services in *this* file
+    _defaults:
+        autowire: true      # Automatically injects dependencies in your services.
+        autoconfigure: true # Automatically registers your services as commands, event subscribers, etc.
+        bind:
+            $appSupportedLocales: '%app.supported_locales%'
+            $supportedShipmentProviders: '%app.supported_shipment_providers%'
+
+    # makes classes in src/ available to be used as services
+    # this creates a service per class whose id is the fully-qualified class name
+    App\:
+        resource: '../src/'
+        exclude:
+            - '../src/Kernel.php'
+
+    # add more service definitions when explicit configuration is needed
+    # please note that last definitions always *replace* previous ones
+    get_set_method_normalizer:
+        class: Symfony\Component\Serializer\Normalizer\GetSetMethodNormalizer
+        tags: [ serializer.normalizer ]
+
+    App\Infrastructure\Collector\MultiDbCollector:
+        tags:
+            -   name: data_collector
+                # must match the value returned by the getName() method
+                id: 'database_connections'
+                # optional template (it has more priority than the value returned by getTemplate())
+                template: 'data_collector/database_connections.html.twig'
+                # optional priority (positive or negative integer; default = 0)
+                # priority: 300
+
+    App\Infrastructure\Delivery\Api\:
+        resource: ../src/Infrastructure/Delivery/Api/
+        tags: [ 'controller.service_arguments' ]
+
+    App\Infrastructure\Delivery\Api\V1\GetDocumentationAction:
+        tags: [ 'controller.service_arguments' ]
+        arguments:
+            # We send project dir as argument because we don't want to use directly container
+            $projectDir: '%kernel.project_dir%'
+
+
+    command_handlers:
+        namespace: App\Application\Command\
+        resource: '%kernel.project_dir%/src/Application/Command/**/*/*CommandHandler.php'
+        tags:
+            - { name: messenger.message_handler, bus: command.bus }
+
+    query_handlers:
+        namespace: App\Application\Query\
+        resource: '%kernel.project_dir%/src/Application/Query/**/*/*QueryHandler.php'
+        tags:
+            - { name: messenger.message_handler, bus: query.bus }
+
+    event_handlers:
+        namespace: App\Application\EventHandler\
+        resource: '%kernel.project_dir%/src/Application/EventHandler/**/*Handler.php'
+        tags:
+            - { name: messenger.message_handler, bus: event.bus }
+
+    Gedmo\Timestampable\TimestampableListener:
+        tags:
+            - { name: doctrine.event_subscriber }
+
+    Gedmo\SoftDeleteable\SoftDeleteableListener:
+        tags:
+            - { name: doctrine.event_subscriber }
+
+    App\Infrastructure\Domain\Model\Tenant\TenantService:
+        arguments:
+            $dbEncryptionKey: '%app.shipment_db_encryption_key%'
+
+    doctrine_repositories:
+        namespace: App\Infrastructure\Domain\Model\
+        resource: '%kernel.project_dir%/src/Infrastructure/Domain/Model/**/Doctrine*Repository.php'
+        tags:
+            - { name: doctrine.repository_service }
+
+    App\Infrastructure\Persistence\Connection\RedisTenantConnection:
+        arguments:
+            $redis: '@cache.default_redis_provider'
+
+    App\Infrastructure\Delivery\Console\TenantCommandSubscriber:
+        arguments:
+            $connection: '@doctrine.dbal.tenant_connection'
+            $allowedCommands: '%app.tenant_commands%'
+
+    App\Infrastructure\Http\TenantRequestSubscriber:
+        arguments:
+            $doctrineTenantConnection: '@doctrine.dbal.tenant_connection'
+            $nonTenantRoutes: '%app.non_tenant_routes%'
+            $wrapInTransaction: '%app.wrap_in_transaction%'
+            $adminRoutesNamePrefix: '%app.admin_routes_name_prefix%'
+
+    App\Infrastructure\Domain\Model\Language\LanguageService:
+        arguments:
+            $supportedLanguages: '%app.supported_languages%'
+
+    App\Application\Service\Files\UrlBuilder:
+        arguments:
+            $baseFilesUrl: '%env(BASE_FILES_URL)%'
+
+    App\Infrastructure\Logger\CorrelationIdProcessor:
+        tags:
+            - { name: monolog.processor }
+
+    App\Infrastructure\Logger\TenantIdProcessor:
+        tags:
+            - { name: monolog.processor }
+
+    Monolog\Processor\MemoryPeakUsageProcessor:
+        tags:
+            - { name: monolog.processor }
+
+    Monolog\Processor\IntrospectionProcessor:
+        tags:
+            - { name: monolog.processor }
+
+    App\Infrastructure\Logger\DataMaskingProcessor:
+        arguments:
+            $sensitiveData: '%app.sensitive_data%'
+        tags:
+            - { name: monolog.processor }
+
+    monolog.formatter.line_formatter:
+        class: Monolog\Formatter\LineFormatter
+        arguments:
+            - "[%%datetime%%] [%%extra.memory_peak_usage%%] [%%extra.correlation_id%%] [%%extra.tenant_id%%] %%channel%%.%%level_name%%: %%message%% %%context%% %%extra%%\n"
+
+    Google\Cloud\Core\Compute\Metadata: ~
+
+    App\Infrastructure\Logger\K8sMetadataProvider:
+        arguments:
+            $projectId: '%env(GCP_PROJECT_ID)%'
+            $containerName: '%env(default::GCP_CONTAINER_NAME)%'
+            $podName: '%env(default::GCP_POD_NAME)%'
+            $namespace: '%env(default::GCP_NAMESPACE_NAME)%'
+
+    Google\Cloud\Core\Report\MetadataProviderInterface $k8sMetadataProvider: '@App\Infrastructure\Logger\K8sMetadataProvider'
+
+    stackdriver_handler:
+        class: App\Infrastructure\Logger\StackdriverHandler
+        arguments:
+            $projectId: '%env(GCP_PROJECT_ID)%'
+            $keyFilePath: '%env(default::GCP_SERVICE_ACCOUNT_KEY_FILE)%'
+            $name: 'stackdriver'
+
+    App\Infrastructure\Delivery\Console\RunTestsCommand:
+        arguments:
+            $kernel: '@kernel'
+            $connection: '@doctrine.dbal.default_connection'
+            $codeCoverageXmlReportDir: '%kernel.project_dir%/coverage-report-xml'
+
+    App\Infrastructure\Messenger\TenantIdMiddleware:
+        arguments:
+            $doctrineTenantConnection: '@doctrine.dbal.tenant_connection'
+
+    App\Domain\Model\SessionUser\SessionUserInterface:
+        factory: [ '@security.helper', 'getUser' ]
+
+    App\Infrastructure\Service\Encryption\ProvidersEncryptor:
+        arguments:
+            $configEncryptionKey: '%app.config_encryption_key%'
+
+    shipping_providers:
+        namespace: App\Infrastructure\Domain\Model\Shipping\
+        resource: '%kernel.project_dir%/src/Infrastructure/Domain/Model/Shipping/*/*ShippingGateway.php'
+        arguments:
+            $request: '@=service("request_stack").getCurrentRequest()'
+        tags: ['app.shipping_providers']
+        public: true
+
+    shipping_providers_locator:
+        class: Symfony\Component\DependencyInjection\ServiceLocator
+        tags: [ 'container.service_locator' ]
+        arguments:
+            - !tagged_iterator { tag: 'app.shipping_providers' }
+
+    App\Infrastructure\Service\Factory\ShippingGatewayFactory:
+        arguments:
+            $shippingProvidersLocator: '@shipping_providers_locator'
+
+    App\Infrastructure\Domain\Model\Provider\DelhiveryProviderSettingsValidator:
+        tags:
+            - { name: 'app.provider.provider_settings_validator', key: 'delhivery' }
+
+    App\Infrastructure\Domain\Model\Provider\TheCourierGuyProviderSettingsValidator:
+        tags:
+            - { name: 'app.provider.provider_settings_validator', key: 'the-courier-guy' }
+
+    App\Infrastructure\Domain\Model\Provider\BorzoProviderSettingsValidator:
+        tags:
+            - { name: 'app.provider.provider_settings_validator', key: 'borzo' }
+
+    App\Infrastructure\Domain\Model\Provider\EcontProviderSettingsValidator:
+        tags:
+            - { name: 'app.provider.provider_settings_validator', key: 'econt' }
+
+    App\Infrastructure\Domain\Model\Provider\SpeedyProviderSettingsValidator:
+        tags:
+            - { name: 'app.provider.provider_settings_validator', key: 'speedy' }
+
+    App\Infrastructure\Domain\Model\Provider\LalamoveProviderSettingsValidator:
+        tags:
+            - { name: 'app.provider.provider_settings_validator', key: 'lalamove' }
+
+    App\Infrastructure\Domain\Model\Provider\SkyNetProviderSettingsValidator:
+        tags:
+            - { name: 'app.provider.provider_settings_validator', key: 'sky-net' }
+    App\Infrastructure\Domain\Model\Provider\DhlProviderSettingsValidator:
+        tags:
+            - { name: 'app.provider.provider_settings_validator', key: 'dhl' }
+
+    App\Infrastructure\Domain\Model\Provider\InOutProviderSettingsValidator:
+        tags:
+            - { name: 'app.provider.provider_settings_validator', key: 'inout' }
+
+    App\Infrastructure\Domain\Model\Provider\BlueEXProviderSettingsValidator:
+        tags:
+            - { name: 'app.provider.provider_settings_validator', key: 'blue-ex' }
+
+    App\Infrastructure\Domain\Model\Provider\CvcProviderSettingsValidator:
+        tags:
+            - { name: 'app.provider.provider_settings_validator', key: 'cvc' }
+    App\Infrastructure\Domain\Model\Provider\SonicProviderSettingsValidator:
+        tags:
+            - { name: 'app.provider.provider_settings_validator', key: 'sonic' }
+
+    App\Infrastructure\Domain\Model\Provider\UParcelProviderSettingsValidator:
+        tags:
+            - { name: 'app.provider.provider_settings_validator', key: 'uparcel' }
+
+    App\Infrastructure\Domain\Model\Provider\PargoProviderSettingsValidator:
+        tags:
+            - { name: 'app.provider.provider_settings_validator', key: 'pargo' }
+
+    App\Infrastructure\Domain\Model\Provider\KwikProviderSettingsValidator:
+        tags:
+            - { name: 'app.provider.provider_settings_validator', key: 'kwik' }
+
+    App\Infrastructure\Domain\Model\Provider\UpsProviderSettingsValidator:
+        tags:
+            - { name: 'app.provider.provider_settings_validator', key: 'ups' }
+    
+    App\Infrastructure\Domain\Model\Provider\FedExProviderSettingsValidator:
+        tags:
+            - { name: 'app.provider.provider_settings_validator', key: 'fedex' }
+
+    App\Infrastructure\Domain\Model\Provider\ShipdeoProviderSettingsValidator:
+        tags:
+            - { name: 'app.provider.provider_settings_validator', key: 'shipdeo' }
+
+    App\Infrastructure\Domain\Model\Provider\JnTProviderSettingsValidator:
+        tags:
+            - { name: 'app.provider.provider_settings_validator', key: 'jnt' }
+    
+    App\Infrastructure\Domain\Model\Provider\PostExProviderSettingsValidator:
+        tags:
+            - { name: 'app.provider.provider_settings_validator', key: 'post-ex' }
+
+    App\Infrastructure\Domain\Model\Provider\LeopardsProviderSettingsValidator:
+        tags:
+            - { name: 'app.provider.provider_settings_validator', key: 'leopards' }
+
+    App\Infrastructure\Domain\Model\Provider\BobGoProviderSettingsValidator:
+        tags:
+            - { name: 'app.provider.provider_settings_validator', key: 'bobgo' }
+
+    App\Application\Service\Registry\RegistryInterface $providerSettingsValidatorRegistry:
+        class: App\Application\Service\Registry\Registry
+        arguments:
+            $itemsType: App\Infrastructure\Domain\Model\Provider\ProviderSettingsValidator
+            $items: !tagged_iterator { tag: 'app.provider.provider_settings_validator', index_by: 'key' }
+            $default: '@App\Infrastructure\Domain\Model\Provider\ProviderSettingsValidator'
+
+    App\Infrastructure\Service\FeatureFlag\GrowthbookFeatureFlagCheckerFactory:
+        arguments:
+            $clientKey: '%app.growthbook_client_key%'
+            $cacheTtl: 120 # in seconds
+            $cache: !service
+                class: 'Symfony\Component\Cache\Psr16Cache'
+                arguments: ['@cache.app']
+            $overrides: '%app.feature_flags%'
+
+    App\Infrastructure\Service\FeatureFlag\GrowthbookFeatureFlagChecker:
+        factory: ['@App\Infrastructure\Service\FeatureFlag\GrowthbookFeatureFlagCheckerFactory', 'create']
+        arguments:
+            $growthbook: !service
+                class: Growthbook\Growthbook
+                factory: [null, 'create']
+
+    App\Application\Service\FeatureFlag\FeatureFlagCheckerInterface: '@App\Infrastructure\Service\FeatureFlag\GrowthbookFeatureFlagChecker'
+
+    League\ISO3166\ISO3166DataProvider:
+        class: League\ISO3166\ISO3166
+
+    App\Application\Service\Registry\RegistryInterface $uninstallAllowedCheckerRegistry:
+        class: App\Application\Service\Registry\Registry
+        arguments:
+            $itemsType: App\Application\Service\App\UninstallAllowedCheckerInterface
+            $items: !tagged_iterator { tag: 'app.uninstall_checker', index_by: 'key' }
+            $default: '@App\Application\Service\App\DefaultUninstallAllowedChecker'
+
+    App\Application\Service\Registry\RegistryInterface $uninstallerRegistry:
+        class: App\Application\Service\Registry\Registry
+        arguments:
+            $itemsType: App\Domain\Model\Tenant\AppUninstallerInterface
+            $items: !tagged_iterator { tag: 'app.uninstaller', index_by: 'key' }
+            $default: '@App\Application\Service\App\DefaultAppUninstaller'
+
+    App\Domain\Model\Shipping\ShippingPayerResolverInterface $speedyShippingPayerResolver:
+        class: App\Application\Service\Shipment\ShippingPayerResolver
+        arguments:
+            $defaultPayer: !service
+                class: App\Domain\Model\Shipping\Payer
+                factory: [ 'App\Domain\Model\Shipping\Payer', 'from' ]
+                arguments: [ 'sender' ]
+
+    App\Domain\Model\Shipping\ShippingPayerResolverInterface $econtShippingPayerResolver:
+        class: App\Application\Service\Shipment\ShippingPayerResolver
+        arguments:
+            $defaultPayer: !service
+                class: App\Domain\Model\Shipping\Payer
+                factory: [ 'App\Domain\Model\Shipping\Payer', 'from' ]
+                arguments: [ 'receiver' ]
+
+    App\Application\Service\Registry\RegistryInterface $updateAllowedCheckerRegistry:
+        class: App\Application\Service\Registry\Registry
+        arguments:
+            $itemsType: App\Application\Service\App\UpdateAllowedCheckerInterface|null
+            $items: !tagged_iterator { tag: 'app.update_checker', index_by: 'key' }
+            $default: '@App\Application\Service\App\AppDeactivateAllowedChecker'
+
+    App\Application\Service\App\CompositeUpdateChecker:
+        class: App\Application\Service\App\CompositeUpdateChecker
+        arguments:
+            - '@App\Application\Service\App\ConnectableAppUpdateAllowedChecker'
+            - '@App\Application\Service\App\AppDeactivateAllowedChecker'
+        tags:
+            - { name: 'app.update_checker', key: 'econt' }
+            - { name: 'app.update_checker', key: 'speedy' }
+
+    App\Application\EventHandler\Tenant\DbCreatedHandler:
+        arguments:
+            $tenantConnection: '@doctrine.dbal.tenant_connection'
+        tags:
+            - { name: messenger.message_handler, bus: event.bus }
+
+    App\Application\Command\App\Install\InstallAppCommandHandler:
+        arguments:
+            $tenantConnection: '@doctrine.dbal.tenant_connection'
+        tags:
+            - { name: messenger.message_handler, bus: command.bus }
+
+    App\Infrastructure\Delivery\Console\CheckShipmentStatusForProvider:
+        arguments:
+            $tenantConnection: '@doctrine.dbal.tenant_connection'
+
+when@test:
+    parameters:
+        app.wrap_in_transaction: true
+        app.redis_dsn: '%env(TEST_REDIS_DSN)%'
+
+    services:
+        # default configuration for services in *this* file
+        _defaults:
+            autowire: true      # Automatically injects dependencies in your services.
+            autoconfigure: true # Automatically registers your services as commands, event subscribers, etc.
+
+        App\Tests\Shared\Service\MockHttpClientFactory:
+            arguments: ['%kernel.project_dir%']
+
+        App\Tests\Shared\Db\Fixtures\Main\:
+            resource: ../tests/Shared/Db/Fixtures/Main/
+            arguments:
+                $connection: '@doctrine.dbal.default_connection'
+                $resourceDir: '%kernel.project_dir%/tests/Shared/Db/Resources/Main/'
+
+        App\Tests\Shared\Db\Fixtures\Tenant\:
+            resource: ../tests/Shared/Db/Fixtures/Tenant/
+            arguments:
+                $connection: '@doctrine.dbal.tenant_connection'
+                $resourceDir: '%kernel.project_dir%/tests/Shared/Db/Resources/Tenant/'
+
+        Growthbook\Growthbook:
+            class: Growthbook\Growthbook
+            factory: [null, 'create']
+            calls:
+                - withLogger: ['@logger']
+
+        App\Tests\Shared\Service\FeatureFlag\GrowthbookFeatureFlagCheckerFactory:
+            class: App\Tests\Shared\Service\FeatureFlag\GrowthbookFeatureFlagCheckerFactory
+
+        App\Infrastructure\Service\FeatureFlag\GrowthbookFeatureFlagChecker:
+            factory: [ '@App\Tests\Shared\Service\FeatureFlag\GrowthbookFeatureFlagCheckerFactory', 'create' ]
+            arguments:
+                $growthbook: '@Growthbook\Growthbook'
+
+        App\Application\EventHandler\Tenant\ShipmentDbCreatedHandler:
+            class: App\Application\EventHandler\Tenant\DbCreatedHandler
+            arguments:
+                $tenantConnection: '@doctrine.dbal.tenant_connection'
+            tags:
+                - { name: messenger.message_handler, bus: event.bus }
+
+
+    framework:
+        http_client:
+            mock_response_factory: App\Tests\Shared\Service\MockHttpClientFactory
